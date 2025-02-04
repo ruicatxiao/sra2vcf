@@ -386,6 +386,7 @@ def variant_discovery(sample, bam_dir, vcf_dir, ref_genome, threads):
             'bcftools', 'mpileup', '--config', config,
             '--threads', str(threads), '-d', '5000', '--output-type', 'v',
             '--max-idepth', '5000',
+            '--annotate', 'INFO/AD',
             '-o', raw_vcf,
             '-f', ref_genome, bam_file
         ], check=True)
@@ -430,33 +431,88 @@ def variant_calling(sample, vcf_dir, threads):
 def analyze_results(samples, vcf_dir, output_dir, chr_region, region_start, region_end):
     output_file = os.path.join(output_dir, f"{chr_region}_{region_start}_{region_end}_output.tsv")
     logging.info(f"Analyzing results and writing to {output_file}...")
+    
+    # Update the header to include AD and AF
     with open(output_file, 'w') as out_f:
-        out_f.write('sampleID\tmoleculeType\tlibraryType\ttechType\tIDV\tDP\tIMF\n')
+        out_f.write('sampleID\tmoleculeType\tlibraryType\ttechType\tIDV\tDP\tIMF\tAD\tAF\n')
+        
         for sample in samples:
             sample_id = sample['sampleID']
             final_vcf = os.path.join(vcf_dir, f"{sample_id}_final.vcf")
+            
             if not os.path.exists(final_vcf):
                 logging.warning(f"Final VCF for sample {sample_id} not found. Skipping.")
                 continue
+            
             with open(final_vcf, 'r') as vcf_f:
                 for line in vcf_f:
                     if line.startswith('#'):
-                        continue
+                        continue  # Skip header lines
+                        
                     cols = line.strip().split('\t')
+                    
+                    # Extract necessary VCF columns
                     chrom = cols[0]
                     pos = int(cols[1])
+                    ref = cols[3]
+                    alt = cols[4]
+                    info = cols[7]
+                    
+                    # Check if the variant is within the specified region
                     if chrom == chr_region and region_start <= pos <= region_end:
-                        info_fields = cols[7].split(';')
+                        # Parse INFO fields into a dictionary
+                        info_fields = info.split(';')
                         info_dict = {}
                         for field in info_fields:
                             if '=' in field:
-                                key, value = field.split('=')
+                                key, value = field.split('=', 1)
                                 info_dict[key] = value
+                            else:
+                                # For flags like 'INDEL' without '=', set the key with value None
+                                info_dict[field] = None
+                        
+                        # Extract common fields
                         idv = info_dict.get('IDV', 'NA')
                         dp = info_dict.get('DP', 'NA')
                         imf = info_dict.get('IMF', 'NA')
-                        out_f.write(f"{sample_id}\t{sample['moleculeType']}\t{sample['libraryType']}\t{sample['techType']}\t{idv}\t{dp}\t{imf}\n")
-                        break  # Assuming only one variant per sample in region
+                        
+                        # Determine if the variant is an INDEL or SNP
+                        if 'INDEL' in info_dict:
+                            # INDEL Variant
+                            ad = 'NA'
+                            af = 'NA'
+                        else:
+                            # SNP Variant
+                            # Extract AD and calculate AF
+                            ad = info_dict.get('AD', 'NA')
+                            if ad != 'NA':
+                                ad_values = ad.split(',')
+                                if len(ad_values) >= 2:
+                                    try:
+                                        # Sum all alternate allele counts (excluding the first value which is for the reference)
+                                        ad_alts = sum(float(ad_value) for ad_value in ad_values[1:])
+                                        dp_val = float(dp) if dp != 'NA' else 0
+                                        af = ad_alts / dp_val if dp_val > 0 else 'NA'
+                                        af = f"{af:.4f}" if isinstance(af, float) else 'NA'
+                                        # Format AD to include all allele depths (reference and alternates)
+                                        ad = ','.join(ad_values)
+                                    except ValueError:
+                                        ad = 'NA'
+                                        af = 'NA'
+                                else:
+                                    ad = 'NA'
+                                    af = 'NA'
+                            else:
+                                ad = 'NA'
+                                af = 'NA'
+                        
+                        # Write the results to the output TSV
+                        out_f.write(f"{sample_id}\t{sample['moleculeType']}\t{sample['libraryType']}\t{sample['techType']}\t{idv}\t{dp}\t{imf}\t{ad}\t{af}\n")
+                        
+                        break  # Assuming only one variant per sample in the region
+
+
+
 
 def plot_results_with_r(output_dir, tsv_file):
     logging.info("Generating plots using R script...")

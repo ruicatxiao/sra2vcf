@@ -26,11 +26,12 @@ def setup_directories():
     vcf_dir = os.path.join(cwd, 'vcf')
     output_dir = os.path.join(cwd, 'out')
     star_index_dir = os.path.join(cwd, 'STAR_INDEX')
+    bam_cov_dir = os.path.join(cwd, 'bam_cov')
 
-    for directory in [fq_dir, bam_dir, vcf_dir, output_dir, star_index_dir]:
+    for directory in [fq_dir, bam_dir, vcf_dir, output_dir, star_index_dir, bam_cov_dir]:
         if not os.path.exists(directory):
             os.makedirs(directory)
-    return fq_dir, bam_dir, vcf_dir, output_dir, star_index_dir
+    return fq_dir, bam_dir, vcf_dir, output_dir, star_index_dir, bam_cov_dir
 
 def check_genome_indexing(ref_genome, ref_gtf, threads, star_index_dir, chr_region, region_start, region_end):
     # 1a. Check if genome has been faidx processed
@@ -153,8 +154,6 @@ def download_sra(sample, fq_dir, threads):
     # Remove the .sra file to save space
     os.remove(sra_file)
 
-
-
 def trim_reads(sample, fq_dir, threads):
     sample_id = sample['sampleID']
     sample_type = sample['sampleType']
@@ -190,6 +189,8 @@ def trim_reads(sample, fq_dir, threads):
             subprocess.run([
                 'trim_galore', '--cores', str(threads),
                 '--paired', '--fastqc', '--gzip', '-o', fq_dir,
+                '--three_prime_clip_R1', '10',
+                '--three_prime_clip_R2', '10',
                 raw_read1, raw_read2
             ], check=True)
             # Trim Galore outputs
@@ -203,6 +204,7 @@ def trim_reads(sample, fq_dir, threads):
             subprocess.run([
                 'trim_galore', '--cores', str(threads),
                 '--fastqc', '--gzip', '-o', fq_dir,
+                '--three_prime_clip_R1', '10',
                 raw_read1
             ], check=True)
             # Trim Galore outputs
@@ -300,7 +302,7 @@ def align_reads(sample, fq_dir, bam_dir, ref_genome, star_index_dir, threads, tr
         logging.error(f"Unsupported combination for sample {sample_id}.")
         sys.exit(1)
 
-def process_bam_file_for_sample(sample, bam_dir, threads):
+def process_bam_file_for_sample(sample, bam_dir, bam_cov_dir, threads):
     sample_id = sample['sampleID']
     tech_type = sample['techType']
     molecule_type = sample['moleculeType']
@@ -330,6 +332,14 @@ def process_bam_file_for_sample(sample, bam_dir, threads):
             ], check=True)
         else:
             logging.error(f"SAM file {sam_file} not found for sample {sample_id}")
+            return
+
+    # Calculate coverage
+    coverage_output = os.path.join(bam_cov_dir, f"{sample_id}_cov.txt")
+    logging.info(f"Calculating coverage for {bam_file}...")
+    subprocess.run([
+        'samtools', 'coverage', '-o', coverage_output, '-d', '0', bam_file
+    ], check=True)
 
 def check_bam_exists(sample, bam_dir):
     sample_id = sample['sampleID']
@@ -406,6 +416,7 @@ def variant_calling(sample, vcf_dir, threads):
         ], check=True)
         subprocess.run([
             'bcftools', 'filter', '--output-type', 'v', '--threads', str(threads),
+            '-i', 'QUAL>=20 && INFO/DP>=20',
             '--output', final_vcf,
             called_vcf
         ], check=True)
@@ -447,7 +458,6 @@ def analyze_results(samples, vcf_dir, output_dir, chr_region, region_start, regi
                         out_f.write(f"{sample_id}\t{sample['moleculeType']}\t{sample['libraryType']}\t{sample['techType']}\t{idv}\t{dp}\t{imf}\n")
                         break  # Assuming only one variant per sample in region
 
-
 def plot_results_with_r(output_dir, tsv_file):
     logging.info("Generating plots using R script...")
     bin_dir = os.path.join(os.getcwd(), 'bin')
@@ -461,12 +471,14 @@ def plot_results_with_r(output_dir, tsv_file):
     except subprocess.CalledProcessError as e:
         logging.error(f"R script failed: {e}")
 
-
-def run_multiqc(fq_dir, output_dir):
+def run_multiqc(fq_dir, bam_cov_dir):
+    multiqc_output_dir = os.path.join(os.getcwd(), 'multiqc_output')
+    if not os.path.exists(multiqc_output_dir):
+        os.makedirs(multiqc_output_dir)
     logging.info("Running multiQC...")
     try:
         subprocess.run([
-            'multiqc', '--force', '--outdir', output_dir, fq_dir
+            'multiqc', '--outdir', multiqc_output_dir, fq_dir, bam_cov_dir
         ], check=True)
         logging.info("multiQC analysis complete.")
     except subprocess.CalledProcessError as e:
@@ -479,7 +491,7 @@ def main():
     args = parse_args()
 
     # Setup directories
-    fq_dir, bam_dir, vcf_dir, output_dir, star_index_dir = setup_directories()
+    fq_dir, bam_dir, vcf_dir, output_dir, star_index_dir, bam_cov_dir = setup_directories()
 
     # Copy reference files to current working directory
     cwd = os.getcwd()
@@ -520,7 +532,7 @@ def main():
             # Alignment
             align_reads(sample, fq_dir, bam_dir, ref_genome, star_index_dir, args.threads, trimmed_reads)
             # BAM processing
-            process_bam_file_for_sample(sample, bam_dir, args.threads)
+            process_bam_file_for_sample(sample, bam_dir, bam_cov_dir, args.threads)
 
     # Step IV: Variant discovery and calling
     for sample in samples:
@@ -538,7 +550,7 @@ def main():
     plot_results_with_r(output_dir, tsv_file)
 
     # Run multiQC
-    run_multiqc(fq_dir, output_dir)
+    run_multiqc(fq_dir, bam_cov_dir)
 
 if __name__ == '__main__':
     main()

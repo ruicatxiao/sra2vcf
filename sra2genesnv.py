@@ -13,11 +13,28 @@ def parse_args():
     parser.add_argument('--ref_genome', required=True, help='Reference genome file (FASTA format)')
     parser.add_argument('--gtf', required=True, help='Reference annotation GTF file')
     parser.add_argument('--sample', required=True, help='Samplesheet CSV file')
+    parser.add_argument('--variant_list', required=True, help='Variant list file with variants of interest')
     parser.add_argument('--threads', type=int, default=8, help='Number of threads to use (default: 8)')
-    parser.add_argument('--chr_region', required=True, help='Chromosome region of interest')
-    parser.add_argument('--region_start', type=int, required=True, help='Region start position')
-    parser.add_argument('--region_end', type=int, required=True, help='Region end position')
     return parser.parse_args()
+
+def parse_variant_list(variant_list_file):
+    logging.info(f"Parsing variant list {variant_list_file}...")
+    variants = []
+    with open(variant_list_file, 'r') as f:
+        header = f.readline().strip().split()
+        if header != ['CHR', 'LOCATION']:
+            logging.error("Variant list file must have header 'CHR LOCATION'")
+            sys.exit(1)
+        for line in f:
+            if not line.strip():
+                continue
+            cols = line.strip().split()
+            if len(cols) != 2:
+                logging.warning(f"Skipping invalid line in variant list: {line.strip()}")
+                continue
+            chr_region, location = cols[0], int(cols[1])
+            variants.append({'chr_region': chr_region, 'location': location})
+    return variants
 
 def setup_directories():
     cwd = os.getcwd()
@@ -33,7 +50,7 @@ def setup_directories():
             os.makedirs(directory)
     return fq_dir, bam_dir, vcf_dir, output_dir, star_index_dir, bam_cov_dir
 
-def check_genome_indexing(ref_genome, ref_gtf, threads, star_index_dir, chr_region, region_start, region_end):
+def check_genome_indexing(ref_genome, ref_gtf, threads, star_index_dir, variants):
     # 1a. Check if genome has been faidx processed
     fai_file = ref_genome + '.fai'
     if not os.path.exists(fai_file):
@@ -65,24 +82,21 @@ def check_genome_indexing(ref_genome, ref_gtf, threads, star_index_dir, chr_regi
     else:
         logging.info(f"STAR genome index already exists in {star_index_dir}. Skipping STAR genomeGenerate.")
 
-    # 1d. Validate chromosome region
-    logging.info(f"Validating chromosome region {chr_region}:{region_start}-{region_end}...")
-    chr_valid = False
-    chr_length = None
+    # 1d. Validate chromosomes in variant list
+    logging.info(f"Validating chromosomes in variant list...")
+    chr_set = set([variant['chr_region'] for variant in variants])
+    chromosomes_in_fai = set()
     with open(fai_file, 'r') as f:
         for line in f:
             cols = line.strip().split('\t')
-            if cols[0] == chr_region:
-                chr_valid = True
-                chr_length = int(cols[1])
-                break
-    if not chr_valid:
-        logging.error(f"Error: Chromosome {chr_region} not found in reference genome.")
+            chromosomes_in_fai.add(cols[0])
+
+    missing_chromosomes = chr_set - chromosomes_in_fai
+    if missing_chromosomes:
+        logging.error(f"Error: Chromosomes {', '.join(missing_chromosomes)} not found in reference genome.")
         sys.exit(1)
-    if not (1 <= region_start < region_end <= chr_length):
-        logging.error(f"Error: Invalid region coordinates. Must satisfy 1 <= region_start < region_end <= {chr_length}.")
-        sys.exit(1)
-    logging.info(f"Chromosome region is valid.")
+    else:
+        logging.info("All chromosomes in variant list are present in the reference genome.")
 
 def parse_samplesheet(samplesheet_file):
     logging.info(f"Parsing samplesheet {samplesheet_file}...")
@@ -428,104 +442,108 @@ def variant_calling(sample, vcf_dir, threads):
         logging.error(f"An error occurred during variant calling for sample {sample_id}: {e}")
         return
 
-def analyze_results(samples, vcf_dir, output_dir, chr_region, region_start, region_end):
-    output_file = os.path.join(output_dir, f"{chr_region}_{region_start}_{region_end}_output.tsv")
-    logging.info(f"Analyzing results and writing to {output_file}...")
-    
-    # Update the header to include AD and AF
-    with open(output_file, 'w') as out_f:
-        out_f.write('sampleID\tmoleculeType\tlibraryType\ttechType\tIDV\tDP\tIMF\tAD\tAF\n')
-        
-        for sample in samples:
-            sample_id = sample['sampleID']
-            final_vcf = os.path.join(vcf_dir, f"{sample_id}_final.vcf")
-            
-            if not os.path.exists(final_vcf):
-                logging.warning(f"Final VCF for sample {sample_id} not found. Skipping.")
-                continue
-            
-            with open(final_vcf, 'r') as vcf_f:
-                for line in vcf_f:
-                    if line.startswith('#'):
-                        continue  # Skip header lines
-                        
-                    cols = line.strip().split('\t')
-                    
-                    # Extract necessary VCF columns
-                    chrom = cols[0]
-                    pos = int(cols[1])
-                    ref = cols[3]
-                    alt = cols[4]
-                    info = cols[7]
-                    
-                    # Check if the variant is within the specified region
-                    if chrom == chr_region and region_start <= pos <= region_end:
-                        # Parse INFO fields into a dictionary
-                        info_fields = info.split(';')
-                        info_dict = {}
-                        for field in info_fields:
-                            if '=' in field:
-                                key, value = field.split('=', 1)
-                                info_dict[key] = value
+def analyze_results(samples, vcf_dir, output_dir, variants):
+    for variant in variants:
+        chr_region = variant['chr_region']
+        location = variant['location']
+        output_file = os.path.join(output_dir, f"{chr_region}_{location}_output.tsv")
+        logging.info(f"Analyzing results for {chr_region}:{location} and writing to {output_file}...")
+
+        with open(output_file, 'w') as out_f:
+            out_f.write('sampleID\tmoleculeType\tlibraryType\ttechType\tIDV\tDP\tIMF\tAD\tAF\n')
+
+            for sample in samples:
+                sample_id = sample['sampleID']
+                final_vcf = os.path.join(vcf_dir, f"{sample_id}_final.vcf")
+
+                if not os.path.exists(final_vcf):
+                    logging.warning(f"Final VCF for sample {sample_id} not found. Skipping.")
+                    continue
+
+                with open(final_vcf, 'r') as vcf_f:
+                    for line in vcf_f:
+                        if line.startswith('#'):
+                            continue  # Skip header lines
+
+                        cols = line.strip().split('\t')
+
+                        # Extract necessary VCF columns
+                        chrom = cols[0]
+                        pos = int(cols[1])
+                        ref = cols[3]
+                        alt = cols[4]
+                        info = cols[7]
+
+                        # Check if the variant matches the specified variant
+                        if chrom == chr_region and pos == location:
+                            # Parse INFO fields into a dictionary
+                            info_fields = info.split(';')
+                            info_dict = {}
+                            for field in info_fields:
+                                if '=' in field:
+                                    key, value = field.split('=', 1)
+                                    info_dict[key] = value
+                                else:
+                                    # For flags like 'INDEL' without '=', set the key with value None
+                                    info_dict[field] = None
+
+                            # Extract common fields
+                            idv = info_dict.get('IDV', 'NA')
+                            dp = info_dict.get('DP', 'NA')
+                            imf = info_dict.get('IMF', 'NA')
+
+                            # Determine if the variant is an INDEL or SNP
+                            if 'INDEL' in info_dict:
+                                # INDEL Variant
+                                ad = 'NA'
+                                af = 'NA'
                             else:
-                                # For flags like 'INDEL' without '=', set the key with value None
-                                info_dict[field] = None
-                        
-                        # Extract common fields
-                        idv = info_dict.get('IDV', 'NA')
-                        dp = info_dict.get('DP', 'NA')
-                        imf = info_dict.get('IMF', 'NA')
-                        
-                        # Determine if the variant is an INDEL or SNP
-                        if 'INDEL' in info_dict:
-                            # INDEL Variant
-                            ad = 'NA'
-                            af = 'NA'
-                        else:
-                            # SNP Variant
-                            # Extract AD and calculate AF
-                            ad = info_dict.get('AD', 'NA')
-                            if ad != 'NA':
-                                ad_values = ad.split(',')
-                                if len(ad_values) >= 2:
-                                    try:
-                                        # Sum all alternate allele counts (excluding the first value which is for the reference)
-                                        ad_alts = sum(float(ad_value) for ad_value in ad_values[1:])
-                                        dp_val = float(dp) if dp != 'NA' else 0
-                                        af = ad_alts / dp_val if dp_val > 0 else 'NA'
-                                        af = f"{af:.4f}" if isinstance(af, float) else 'NA'
-                                        # Format AD to include all allele depths (reference and alternates)
-                                        ad = ','.join(ad_values)
-                                    except ValueError:
+                                # SNP Variant
+                                # Extract AD and calculate AF
+                                ad = info_dict.get('AD', 'NA')
+                                if ad != 'NA':
+                                    ad_values = ad.split(',')
+                                    if len(ad_values) >= 2:
+                                        try:
+                                            # Sum all alternate allele counts (excluding the first value which is for the reference)
+                                            ad_alts = sum(float(ad_value) for ad_value in ad_values[1:])
+                                            dp_val = float(dp) if dp != 'NA' else 0
+                                            af = ad_alts / dp_val if dp_val > 0 else 'NA'
+                                            af = f"{af:.4f}" if isinstance(af, float) else 'NA'
+                                            # Format AD to include all allele depths (reference and alternates)
+                                            ad = ','.join(ad_values)
+                                        except ValueError:
+                                            ad = 'NA'
+                                            af = 'NA'
+                                    else:
                                         ad = 'NA'
                                         af = 'NA'
                                 else:
                                     ad = 'NA'
                                     af = 'NA'
-                            else:
-                                ad = 'NA'
-                                af = 'NA'
-                        
-                        # Write the results to the output TSV
-                        out_f.write(f"{sample_id}\t{sample['moleculeType']}\t{sample['libraryType']}\t{sample['techType']}\t{idv}\t{dp}\t{imf}\t{ad}\t{af}\n")
-                        
-                        break  # Assuming only one variant per sample in the region
 
+                            # Write the results to the output TSV
+                            out_f.write(f"{sample_id}\t{sample['moleculeType']}\t{sample['libraryType']}\t{sample['techType']}\t{idv}\t{dp}\t{imf}\t{ad}\t{af}\n")
 
+                            break  # Assuming only one matching variant per sample
 
+        # Generate plots for this variant
+        tsv_file = output_file
+        plot_results_with_r(output_dir, tsv_file, f"{chr_region}_{location}")
 
-def plot_results_with_r(output_dir, tsv_file):
-    logging.info("Generating plots using R script...")
+def plot_results_with_r(output_dir, tsv_file, output_prefix):
+    logging.info(f"Generating plots for {output_prefix} using R script...")
     bin_dir = os.path.join(os.getcwd(), 'bin')
     r_script = os.path.join(bin_dir, 'plot_variants.R')
     if not os.path.exists(r_script):
         logging.error(f"R script {r_script} not found in bin directory.")
         return
     try:
-        subprocess.run(['Rscript', r_script, tsv_file], check=True)
-        logging.info("Plots generated successfully.")
+        # Pass the output directory and output prefix to the R script
+        subprocess.run(['Rscript', r_script, tsv_file, output_dir, output_prefix], check=True)
+        logging.info(f"Plots generated successfully for {output_prefix}.")
     except subprocess.CalledProcessError as e:
-        logging.error(f"R script failed: {e}")
+        logging.error(f"R script failed for {output_prefix}: {e}")
 
 def run_multiqc(fq_dir, bam_cov_dir):
     multiqc_output_dir = os.path.join(os.getcwd(), 'multiqc_output')
@@ -558,8 +576,11 @@ def main():
     if not os.path.exists(ref_gtf):
         shutil.copy(args.gtf, ref_gtf)
 
+    # Parse variant list
+    variants = parse_variant_list(args.variant_list)
+
     # Check genome indexing
-    check_genome_indexing(ref_genome, ref_gtf, args.threads, star_index_dir, args.chr_region, args.region_start, args.region_end)
+    check_genome_indexing(ref_genome, ref_gtf, args.threads, star_index_dir, variants)
 
     # Parse samplesheet
     samples = parse_samplesheet(args.sample)
@@ -600,10 +621,8 @@ def main():
         variant_discovery(sample, bam_dir, vcf_dir, ref_genome, args.threads)
         variant_calling(sample, vcf_dir, args.threads)
 
-    # Step V: Analysis and plotting
-    analyze_results(samples, vcf_dir, output_dir, args.chr_region, args.region_start, args.region_end)
-    tsv_file = os.path.join(output_dir, f"{args.chr_region}_{args.region_start}_{args.region_end}_output.tsv")
-    plot_results_with_r(output_dir, tsv_file)
+    # Step V: Analysis and plotting for each variant
+    analyze_results(samples, vcf_dir, output_dir, variants)
 
     # Run multiQC
     run_multiqc(fq_dir, bam_cov_dir)

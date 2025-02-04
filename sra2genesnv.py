@@ -442,12 +442,51 @@ def variant_calling(sample, vcf_dir, threads):
         logging.error(f"An error occurred during variant calling for sample {sample_id}: {e}")
         return
 
-def analyze_results(samples, vcf_dir, output_dir, variants):
+
+def analyze_results(samples, vcf_dir, bam_dir, output_dir, variants):
     for variant in variants:
         chr_region = variant['chr_region']
         location = variant['location']
         output_file = os.path.join(output_dir, f"{chr_region}_{location}_output.tsv")
         logging.info(f"Analyzing results for {chr_region}:{location} and writing to {output_file}...")
+
+        variant_type = None  # Will be 'SNP' or 'INDEL'
+
+        for sample in samples:
+            sample_id = sample['sampleID']
+            final_vcf = os.path.join(vcf_dir, f"{sample_id}_final.vcf")
+
+            if not os.path.exists(final_vcf):
+                continue
+
+            with open(final_vcf, 'r') as vcf_f:
+                for line in vcf_f:
+                    if line.startswith('#'):
+                        continue
+                    cols = line.strip().split('\t')
+                    chrom = cols[0]
+                    pos = int(cols[1])
+                    if chrom == chr_region and pos == location:
+                        info = cols[7]
+                        info_fields = info.split(';')
+                        info_dict = {}
+                        for field in info_fields:
+                            if '=' in field:
+                                key, value = field.split('=', 1)
+                                info_dict[key] = value
+                            else:
+                                info_dict[field] = None
+                        if 'INDEL' in info_dict:
+                            variant_type = 'INDEL'
+                        else:
+                            variant_type = 'SNP'
+                        break  
+                if variant_type:
+                    break  
+
+        if not variant_type:
+            logging.warning(f"Variant type for {chr_region}:{location} could not be determined. Assuming SNP.")
+            variant_type = 'SNP'  
 
         with open(output_file, 'w') as out_f:
             out_f.write('sampleID\tmoleculeType\tlibraryType\ttechType\tIDV\tDP\tIMF\tAD\tAF\n')
@@ -455,10 +494,19 @@ def analyze_results(samples, vcf_dir, output_dir, variants):
             for sample in samples:
                 sample_id = sample['sampleID']
                 final_vcf = os.path.join(vcf_dir, f"{sample_id}_final.vcf")
+                bam_file = None
+                tech_type = sample['techType']
+                molecule_type = sample['moleculeType']
+                if tech_type == 'Illumina' and molecule_type == 'RNA':
+                    bam_file = os.path.join(bam_dir, f"{sample_id}_Aligned.sortedByCoord.out.bam")
+                else:
+                    bam_file = os.path.join(bam_dir, f"{sample_id}.bam")
 
                 if not os.path.exists(final_vcf):
                     logging.warning(f"Final VCF for sample {sample_id} not found. Skipping.")
                     continue
+
+                variant_found = False
 
                 with open(final_vcf, 'r') as vcf_f:
                     for line in vcf_f:
@@ -466,17 +514,13 @@ def analyze_results(samples, vcf_dir, output_dir, variants):
                             continue  # Skip header lines
 
                         cols = line.strip().split('\t')
-
-                        # Extract necessary VCF columns
                         chrom = cols[0]
                         pos = int(cols[1])
-                        ref = cols[3]
-                        alt = cols[4]
-                        info = cols[7]
-
-                        # Check if the variant matches the specified variant
                         if chrom == chr_region and pos == location:
-                            # Parse INFO fields into a dictionary
+                            variant_found = True
+                            ref = cols[3]
+                            alt = cols[4]
+                            info = cols[7]
                             info_fields = info.split(';')
                             info_dict = {}
                             for field in info_fields:
@@ -484,33 +528,27 @@ def analyze_results(samples, vcf_dir, output_dir, variants):
                                     key, value = field.split('=', 1)
                                     info_dict[key] = value
                                 else:
-                                    # For flags like 'INDEL' without '=', set the key with value None
+                                    
                                     info_dict[field] = None
 
-                            # Extract common fields
                             idv = info_dict.get('IDV', 'NA')
                             dp = info_dict.get('DP', 'NA')
                             imf = info_dict.get('IMF', 'NA')
 
-                            # Determine if the variant is an INDEL or SNP
-                            if 'INDEL' in info_dict:
-                                # INDEL Variant
+                            if variant_type == 'INDEL':
                                 ad = 'NA'
                                 af = 'NA'
                             else:
-                                # SNP Variant
-                                # Extract AD and calculate AF
                                 ad = info_dict.get('AD', 'NA')
                                 if ad != 'NA':
                                     ad_values = ad.split(',')
                                     if len(ad_values) >= 2:
                                         try:
-                                            # Sum all alternate allele counts (excluding the first value which is for the reference)
+
                                             ad_alts = sum(float(ad_value) for ad_value in ad_values[1:])
                                             dp_val = float(dp) if dp != 'NA' else 0
                                             af = ad_alts / dp_val if dp_val > 0 else 'NA'
                                             af = f"{af:.4f}" if isinstance(af, float) else 'NA'
-                                            # Format AD to include all allele depths (reference and alternates)
                                             ad = ','.join(ad_values)
                                         except ValueError:
                                             ad = 'NA'
@@ -522,14 +560,72 @@ def analyze_results(samples, vcf_dir, output_dir, variants):
                                     ad = 'NA'
                                     af = 'NA'
 
-                            # Write the results to the output TSV
                             out_f.write(f"{sample_id}\t{sample['moleculeType']}\t{sample['libraryType']}\t{sample['techType']}\t{idv}\t{dp}\t{imf}\t{ad}\t{af}\n")
 
-                            break  # Assuming only one matching variant per sample
+                            break 
 
-        # Generate plots for this variant
-        tsv_file = output_file
-        plot_results_with_r(output_dir, tsv_file, f"{chr_region}_{location}")
+                if not variant_found:
+                    # Variant not found in VCF for this sample
+                    # Now check the coverage at this position in the sample's BAM file
+                    if not os.path.exists(bam_file):
+                        logging.warning(f"BAM file for sample {sample_id} not found. Skipping coverage check.")
+                        continue
+                    cmd = ['samtools', 'depth', '-r', f'{chr_region}:{location}-{location}', bam_file]
+                    try:
+                        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
+                        coverage_output = result.stdout.strip()
+                        if coverage_output:
+                            fields = coverage_output.split('\t')
+                            if len(fields) >= 3:
+                                dp = fields[2]
+                                dp_val = int(dp)
+                                if dp_val >= 20:
+                                    if variant_type == 'INDEL':
+                                        idv = '0'
+                                        imf = 'NA'
+                                        ad = 'NA'
+                                        af = 'NA'
+                                    else:
+                                        idv = 'NA'
+                                        imf = 'NA'
+                                        ad = f'{dp},0'
+                                        af = '0.0000'
+
+                                    out_f.write(f"{sample_id}\t{sample['moleculeType']}\t{sample['libraryType']}\t{sample['techType']}\t{idv}\t{dp}\t{imf}\t{ad}\t{af}\n")
+                                else:
+                                    dp = dp
+                                    if variant_type == 'INDEL':
+                                        idv = 'NA'
+                                        imf = 'NA'
+                                        ad = 'NA'
+                                        af = 'NA'
+                                    else:
+                                        idv = 'NA'
+                                        imf = 'NA'
+                                        ad = 'NA'
+                                        af = 'NA'
+                                    out_f.write(f"{sample_id}\t{sample['moleculeType']}\t{sample['libraryType']}\t{sample['techType']}\t{idv}\t{dp}\t{imf}\t{ad}\t{af}\n")
+                            else:
+                                logging.warning(f"Unexpected output from samtools depth for sample {sample_id} at {chr_region}:{location}")
+                        else:
+                            dp = '0'
+                            if variant_type == 'INDEL':
+                                idv = 'NA'
+                                imf = 'NA'
+                                ad = 'NA'
+                                af = 'NA'
+                            else:
+                                idv = 'NA'
+                                imf = 'NA'
+                                ad = 'NA'
+                                af = 'NA'
+                            # Write the results to the output TSV
+                            out_f.write(f"{sample_id}\t{sample['moleculeType']}\t{sample['libraryType']}\t{sample['techType']}\t{idv}\t{dp}\t{imf}\t{ad}\t{af}\n")
+                    except subprocess.CalledProcessError as e:
+                        logging.error(f"Error running samtools depth for sample {sample_id}: {e}")
+                        continue
+
+
 
 def plot_results_with_r(output_dir, tsv_file, output_prefix):
     logging.info(f"Generating plots for {output_prefix} using R script...")
@@ -622,9 +718,16 @@ def main():
         variant_calling(sample, vcf_dir, args.threads)
 
     # Step V: Analysis and plotting for each variant
-    analyze_results(samples, vcf_dir, output_dir, variants)
+    analyze_results(samples, vcf_dir, bam_dir, output_dir, variants)
 
-    # Run multiQC
+    # Step VI: Plotting results for each variant
+    for variant in variants:
+        chr_region = variant['chr_region']
+        location = variant['location']
+        output_file = os.path.join(output_dir, f"{chr_region}_{location}_output.tsv")
+        plot_results_with_r(output_dir, output_file, f"{chr_region}_{location}")
+
+    # Step VII: Run multiQC
     run_multiqc(fq_dir, bam_cov_dir)
 
 if __name__ == '__main__':

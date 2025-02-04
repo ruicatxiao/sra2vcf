@@ -91,19 +91,69 @@ def parse_samplesheet(samplesheet_file):
 
 def download_sra(sample, fq_dir, threads):
     sra_number = sample['sampleID']
-    logging.info(f"Downloading SRA data for {sra_number}...")
-    if sample['libraryType'] == 'Paired':
-        subprocess.run([
-            'fasterq-dump', '-e', str(threads),
-            '--split-files', '-p', sra_number,
-            '-O', fq_dir
-        ], check=True)
-    else:
-        subprocess.run([
-            'fasterq-dump', '-e', str(threads),
-            '-p', sra_number,
-            '-O', fq_dir
-        ], check=True)
+    logging.info(f"Downloading SRA data for {sra_number} using prefetch...")
+    sra_file = os.path.join(fq_dir, f"{sra_number}.sra")
+    max_retries = 2  # Total number of retries
+    retries = 0
+
+    # Use prefetch to download the .sra file with retry logic
+    while retries <= max_retries:
+        try:
+            subprocess.run([
+                'prefetch', '--max-size', '100000000', sra_number, '-o', sra_file
+            ], check=True)
+            logging.info(f"Successfully downloaded {sra_number}.sra")
+            break  # Exit the loop if prefetch is successful
+        except subprocess.CalledProcessError as e:
+            retries += 1
+            if retries > max_retries:
+                logging.error(f"prefetch failed for {sra_number} after {max_retries + 1} attempts: {e}")
+                return
+            else:
+                logging.warning(f"prefetch attempt {retries} failed for {sra_number}. Retrying...")
+                continue
+
+    # Use fasterq-dump to convert .sra to FASTQ files
+    logging.info(f"Converting .sra file to FASTQ using fasterq-dump for {sra_number}...")
+    try:
+        if sample['libraryType'] == 'Paired':
+            subprocess.run([
+                'fasterq-dump', sra_file,
+                '--split-files',
+                '--threads', str(threads),
+                '--progress',
+                '--temp', '.',
+                '--details',
+                '--outdir', fq_dir
+            ], check=True)
+            # Verify that the FASTQ files exist
+            read1 = os.path.join(fq_dir, f"{sra_number}_1.fastq")
+            read2 = os.path.join(fq_dir, f"{sra_number}_2.fastq")
+            if not os.path.exists(read1) or not os.path.exists(read2):
+                logging.error(f"FASTQ files for {sra_number} not found after fasterq-dump.")
+                return
+        else:
+            subprocess.run([
+                'fasterq-dump', sra_file,
+                '--threads', str(threads),
+                '--progress',
+                '--temp', '.',
+                '--details',
+                '--outdir', fq_dir
+            ], check=True)
+            # Verify that the FASTQ file exists
+            read1 = os.path.join(fq_dir, f"{sra_number}.fastq")
+            if not os.path.exists(read1):
+                logging.error(f"FASTQ file for {sra_number} not found after fasterq-dump.")
+                return
+    except subprocess.CalledProcessError as e:
+        logging.error(f"fasterq-dump failed for {sra_number}: {e}")
+        return
+
+    # Remove the .sra file to save space
+    os.remove(sra_file)
+
+
 
 def trim_reads(sample, fq_dir, threads):
     sample_id = sample['sampleID']
@@ -397,28 +447,30 @@ def analyze_results(samples, vcf_dir, output_dir, chr_region, region_start, regi
                         out_f.write(f"{sample_id}\t{sample['moleculeType']}\t{sample['libraryType']}\t{sample['techType']}\t{idv}\t{dp}\t{imf}\n")
                         break  # Assuming only one variant per sample in region
 
-def plot_results(output_dir, chr_region, region_start, region_end):
-    import matplotlib.pyplot as plt
-    import pandas as pd
-    output_file = os.path.join(output_dir, f"{chr_region}_{region_start}_{region_end}_output.tsv")
-    df = pd.read_csv(output_file, sep='\t')
-    if df.empty:
-        logging.warning("No data to plot.")
+
+def plot_results_with_r(output_dir, tsv_file):
+    logging.info("Generating plots using R script...")
+    bin_dir = os.path.join(os.getcwd(), 'bin')
+    r_script = os.path.join(bin_dir, 'plot_variants.R')
+    if not os.path.exists(r_script):
+        logging.error(f"R script {r_script} not found in bin directory.")
         return
-    samples = df['sampleID']
-    idv = df['IDV'].astype(float)
-    dp = df['DP'].astype(float)
-    deletion = dp - idv
-    data = pd.DataFrame({'Reference': idv, 'Deletion': deletion}, index=samples)
-    data_pct = data.div(data.sum(axis=1), axis=0)
-    ax = data_pct.plot(kind='bar', stacked=True)
-    plt.ylabel('Percentage')
-    plt.title('INDEL Frequency')
-    plt.legend(loc='upper right')
-    plt.tight_layout()
-    plot_file = os.path.join(output_dir, f"{chr_region}_{region_start}_{region_end}_plot.png")
-    plt.savefig(plot_file)
-    logging.info(f"Plot saved to {plot_file}")
+    try:
+        subprocess.run(['Rscript', r_script, tsv_file], check=True)
+        logging.info("Plots generated successfully.")
+    except subprocess.CalledProcessError as e:
+        logging.error(f"R script failed: {e}")
+
+
+def run_multiqc(fq_dir, output_dir):
+    logging.info("Running multiQC...")
+    try:
+        subprocess.run([
+            'multiqc', '--force', '--outdir', output_dir, fq_dir
+        ], check=True)
+        logging.info("multiQC analysis complete.")
+    except subprocess.CalledProcessError as e:
+        logging.error(f"multiQC failed: {e}")
 
 def main():
     # Configure logging
@@ -472,12 +524,21 @@ def main():
 
     # Step IV: Variant discovery and calling
     for sample in samples:
+        sample_id = sample['sampleID']
+        final_vcf = os.path.join(vcf_dir, f"{sample_id}_final.vcf")
+        if os.path.exists(final_vcf) and os.path.getsize(final_vcf) > 0:
+            logging.info(f"Final VCF for sample {sample_id} already exists and is not empty. Skipping variant discovery and calling.")
+            continue
         variant_discovery(sample, bam_dir, vcf_dir, ref_genome, args.threads)
         variant_calling(sample, vcf_dir, args.threads)
 
     # Step V: Analysis and plotting
     analyze_results(samples, vcf_dir, output_dir, args.chr_region, args.region_start, args.region_end)
-    plot_results(output_dir, args.chr_region, args.region_start, args.region_end)
+    tsv_file = os.path.join(output_dir, f"{args.chr_region}_{args.region_start}_{args.region_end}_output.tsv")
+    plot_results_with_r(output_dir, tsv_file)
+
+    # Run multiQC
+    run_multiqc(fq_dir, output_dir)
 
 if __name__ == '__main__':
     main()

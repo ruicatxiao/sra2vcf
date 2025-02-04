@@ -143,8 +143,10 @@ def trim_reads(sample, fq_dir, threads):
                 raw_read1, raw_read2
             ], check=True)
             # Trim Galore outputs
-            trimmed_read1 = os.path.join(fq_dir, os.path.basename(raw_read1).replace('.fastq', '_val_1.fq.gz'))
-            trimmed_read2 = os.path.join(fq_dir, os.path.basename(raw_read2).replace('.fastq', '_val_2.fq.gz'))
+            trimmed_read1 = os.path.join(fq_dir, f"{sample_id}_1_val_1.fq.gz")
+            trimmed_read2 = os.path.join(fq_dir, f"{sample_id}_2_val_2.fq.gz")
+            shutil.move(os.path.join(fq_dir, os.path.basename(raw_read1).replace('.fastq', '_val_1.fq.gz')), trimmed_read1)
+            shutil.move(os.path.join(fq_dir, os.path.basename(raw_read2).replace('.fastq', '_val_2.fq.gz')), trimmed_read2)
             trimmed_reads['read1'] = trimmed_read1
             trimmed_reads['read2'] = trimmed_read2
         else:
@@ -154,7 +156,8 @@ def trim_reads(sample, fq_dir, threads):
                 raw_read1
             ], check=True)
             # Trim Galore outputs
-            trimmed_read1 = os.path.join(fq_dir, os.path.basename(raw_read1).replace('.fastq', '_trimmed.fq.gz'))
+            trimmed_read1 = os.path.join(fq_dir, f"{sample_id}_trimmed.fq.gz")
+            shutil.move(os.path.join(fq_dir, os.path.basename(raw_read1).replace('.fastq', '_trimmed.fq.gz')), trimmed_read1)
             trimmed_reads['read1'] = trimmed_read1
     else:
         # For non-Illumina, no trimming is performed
@@ -247,25 +250,52 @@ def align_reads(sample, fq_dir, bam_dir, ref_genome, star_index_dir, threads, tr
         logging.error(f"Unsupported combination for sample {sample_id}.")
         sys.exit(1)
 
-def process_bam_files(bam_dir, threads):
-    logging.info("Processing SAM to BAM and indexing...")
-    for filename in os.listdir(bam_dir):
-        if filename.endswith('.sam'):
-            sam_path = os.path.join(bam_dir, filename)
-            bam_path = sam_path.replace('.sam', '.bam')
-            logging.info(f"Converting and sorting {sam_path} to {bam_path}...")
+def process_bam_file_for_sample(sample, bam_dir, threads):
+    sample_id = sample['sampleID']
+    tech_type = sample['techType']
+    molecule_type = sample['moleculeType']
+
+    if tech_type == 'Illumina' and molecule_type == 'RNA':
+        # For STAR alignment, the BAM file is already sorted and generated
+        # We just need to index it if not already indexed
+        bam_file = os.path.join(bam_dir, f"{sample_id}_Aligned.sortedByCoord.out.bam")
+        bai_file = bam_file + '.bai'
+        if not os.path.exists(bai_file):
+            logging.info(f"Indexing {bam_file}...")
             subprocess.run([
-                'samtools', 'sort', '-@', str(threads), '-o', bam_path, sam_path
+                'samtools', 'index', '-@', str(threads), bam_file
             ], check=True)
-            os.remove(sam_path)
-    # Index BAM files
-    for filename in os.listdir(bam_dir):
-        if filename.endswith('.bam'):
-            bam_path = os.path.join(bam_dir, filename)
-            logging.info(f"Indexing {bam_path}...")
+    else:
+        sam_file = os.path.join(bam_dir, f"{sample_id}.sam")
+        bam_file = sam_file.replace('.sam', '.bam')
+        if os.path.exists(sam_file):
+            logging.info(f"Converting and sorting {sam_file} to {bam_file}...")
             subprocess.run([
-                'samtools', 'index', '-@', str(threads), bam_path
+                'samtools', 'sort', '-@', str(threads), '-o', bam_file, sam_file
             ], check=True)
+            os.remove(sam_file)
+            logging.info(f"Indexing {bam_file}...")
+            subprocess.run([
+                'samtools', 'index', '-@', str(threads), bam_file
+            ], check=True)
+        else:
+            logging.error(f"SAM file {sam_file} not found for sample {sample_id}")
+
+def check_bam_exists(sample, bam_dir):
+    sample_id = sample['sampleID']
+    tech_type = sample['techType']
+    molecule_type = sample['moleculeType']
+
+    if tech_type == 'Illumina' and molecule_type == 'RNA':
+        bam_file = os.path.join(bam_dir, f"{sample_id}_Aligned.sortedByCoord.out.bam")
+    else:
+        bam_file = os.path.join(bam_dir, f"{sample_id}.bam")
+
+    bai_file = bam_file + '.bai'
+    if os.path.exists(bam_file) and os.path.exists(bai_file):
+        return True
+    else:
+        return False
 
 def variant_discovery(sample, bam_dir, vcf_dir, ref_genome, threads):
     sample_id = sample['sampleID']
@@ -279,24 +309,32 @@ def variant_discovery(sample, bam_dir, vcf_dir, ref_genome, threads):
         config = 'ont-sup-1.20'
     else:
         logging.error(f"Unsupported tech type {tech_type} for sample {sample_id}.")
-        sys.exit(1)
-    bam_file = None
-    # For RNA samples aligned with STAR, BAM files are named differently
+        return
+
     if tech_type == 'Illumina' and sample['moleculeType'] == 'RNA':
         bam_file = os.path.join(bam_dir, f"{sample_id}_Aligned.sortedByCoord.out.bam")
     else:
         bam_file = os.path.join(bam_dir, f"{sample_id}.bam")
+
     if not os.path.exists(bam_file):
         logging.error(f"BAM file for sample {sample_id} not found.")
-        sys.exit(1)
+        return
+
     raw_vcf = os.path.join(vcf_dir, f"{sample_id}_raw.vcf")
-    subprocess.run([
-        'bcftools', 'mpileup', '--config', config,
-        '--threads', str(threads), '-d', '5000', '--output-type', 'v',
-        '--max-idepth', '5000',
-        '-o', raw_vcf,
-        '-f', ref_genome, bam_file
-    ], check=True)
+    try:
+        subprocess.run([
+            'bcftools', 'mpileup', '--config', config,
+            '--threads', str(threads), '-d', '5000', '--output-type', 'v',
+            '--max-idepth', '5000',
+            '-o', raw_vcf,
+            '-f', ref_genome, bam_file
+        ], check=True)
+    except subprocess.CalledProcessError as e:
+        logging.error(f"Variant discovery failed for sample {sample_id}: {e}")
+        return
+    except Exception as e:
+        logging.error(f"An error occurred during variant discovery for sample {sample_id}: {e}")
+        return
 
 def variant_calling(sample, vcf_dir, threads):
     sample_id = sample['sampleID']
@@ -304,17 +342,29 @@ def variant_calling(sample, vcf_dir, threads):
     raw_vcf = os.path.join(vcf_dir, f"{sample_id}_raw.vcf")
     called_vcf = os.path.join(vcf_dir, f"{sample_id}_called.vcf")
     final_vcf = os.path.join(vcf_dir, f"{sample_id}_final.vcf")
-    subprocess.run([
-        'bcftools', 'call', '--threads', str(threads),
-        '-A', '-mv',
-        '-o', called_vcf,
-        raw_vcf
-    ], check=True)
-    subprocess.run([
-        'bcftools', 'filter', '--output-type', 'v', '--threads', str(threads),
-        '--output', final_vcf,
-        called_vcf
-    ], check=True)
+
+    if not os.path.exists(raw_vcf):
+        logging.error(f"Raw VCF file for sample {sample_id} not found.")
+        return
+
+    try:
+        subprocess.run([
+            'bcftools', 'call', '--threads', str(threads),
+            '-A', '-mv',
+            '-o', called_vcf,
+            raw_vcf
+        ], check=True)
+        subprocess.run([
+            'bcftools', 'filter', '--output-type', 'v', '--threads', str(threads),
+            '--output', final_vcf,
+            called_vcf
+        ], check=True)
+    except subprocess.CalledProcessError as e:
+        logging.error(f"Variant calling failed for sample {sample_id}: {e}")
+        return
+    except Exception as e:
+        logging.error(f"An error occurred during variant calling for sample {sample_id}: {e}")
+        return
 
 def analyze_results(samples, vcf_dir, output_dir, chr_region, region_start, region_end):
     output_file = os.path.join(output_dir, f"{chr_region}_{region_start}_{region_end}_output.tsv")
@@ -383,8 +433,10 @@ def main():
     cwd = os.getcwd()
     ref_genome = os.path.join(cwd, 'reference_genome.fasta')
     ref_gtf = os.path.join(cwd, 'reference_genome.gtf')
-    shutil.copy(args.ref_genome, ref_genome)
-    shutil.copy(args.gtf, ref_gtf)
+    if not os.path.exists(ref_genome):
+        shutil.copy(args.ref_genome, ref_genome)
+    if not os.path.exists(ref_gtf):
+        shutil.copy(args.gtf, ref_gtf)
 
     # Check genome indexing
     check_genome_indexing(ref_genome, ref_gtf, args.threads, star_index_dir, args.chr_region, args.region_start, args.region_end)
@@ -399,18 +451,24 @@ def main():
         library_type = sample['libraryType']
         logging.info(f"Processing sample {sample['sampleID']} ({sample_type}, {tech_type}, {library_type})")
 
-        trimmed_reads = {}
-        # Step II: Branching
-        if sample_type == 'SRA':
-            download_sra(sample, fq_dir, args.threads)
-            trimmed_reads = trim_reads(sample, fq_dir, args.threads)
-        elif sample_type == 'LOCAL':
-            trimmed_reads = trim_reads(sample, fq_dir, args.threads)
-        # Alignment
-        align_reads(sample, fq_dir, bam_dir, ref_genome, star_index_dir, args.threads, trimmed_reads)
+        # Check if BAM and .bai files exist
+        bam_exists = check_bam_exists(sample, bam_dir)
 
-    # Step III: Shared BAM processing
-    process_bam_files(bam_dir, args.threads)
+        if bam_exists:
+            logging.info(f"BAM files for sample {sample['sampleID']} already exist. Skipping steps I to III.")
+        else:
+            # Steps I to III
+            trimmed_reads = {}
+            # Step II: Branching
+            if sample_type == 'SRA':
+                download_sra(sample, fq_dir, args.threads)
+                trimmed_reads = trim_reads(sample, fq_dir, args.threads)
+            elif sample_type == 'LOCAL':
+                trimmed_reads = trim_reads(sample, fq_dir, args.threads)
+            # Alignment
+            align_reads(sample, fq_dir, bam_dir, ref_genome, star_index_dir, args.threads, trimmed_reads)
+            # BAM processing
+            process_bam_file_for_sample(sample, bam_dir, args.threads)
 
     # Step IV: Variant discovery and calling
     for sample in samples:

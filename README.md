@@ -1,3 +1,5 @@
+![Image](https://github.com/user-attachments/assets/8d95fe7b-e1eb-4fa1-b090-191ebe781992)
+
 # sra2vcf: A Comprehensive Variant Discovery Pipeline
 
 sra2vcf is a Python-based pipeline for performing robust and comprehensive SNP/Indel analysis across diverse sequencing data types specifically tailed for Cryptosporidium parvum. This versatile tool can process both local files and SRA data from NCBI, supporting short and long reads, DNA and RNA sequencing data.

@@ -1,6 +1,6 @@
-# SRA2GeneSNV: A Comprehensive Variant Discovery Pipeline
+# sra2vcf: A Comprehensive Variant Discovery Pipeline
 
-SRA2GeneSNV is a Python-based pipeline for performing robust and comprehensive SNP/Indel analysis across diverse sequencing data types. This versatile tool can process both local files and SRA data from NCBI, supporting short and long reads, DNA and RNA sequencing data.
+sra2vcf is a Python-based pipeline for performing robust and comprehensive SNP/Indel analysis across diverse sequencing data types specifically tailed for Cryptosporidium parvum. This versatile tool can process both local files and SRA data from NCBI, supporting short and long reads, DNA and RNA sequencing data.
 
 ## Features
 
@@ -24,6 +24,10 @@ SRA2GeneSNV is a Python-based pipeline for performing robust and comprehensive S
   - Automatic quality control through MultiQC
   - Custom plots for variant frequency comparison across samples
   - Technology-specific variant calling parameters
+
+- **Accumulative processing 
+  - Adding new samples over time without reprocessing existing data
+  - Automatically regenerates combined figures and tables when new samples are added
 
 ## Requirements
 
@@ -67,18 +71,19 @@ All tools should be available in your `$PATH`:
 ## Input Files
 
 ### 1. Reference Genome
-FASTA format reference genome file
+FASTA format reference genome file. T2T Cparvum BGF annotation is provded here.
 
 ### 2. Reference GTF Annotation
-Gene annotation file in GTF format
+Gene annotation file in GTF3 format, we recommend you clean your GTF file with latest AGAT. T2T Cparvum BGF annotation is provded here.
 
 ### 3. Variant List
-Tab-delimited file containing variants of interest:
+Tab-delimited file containing your variants of interest:
 
 ```
 CHR	LOCATION
 CP141119.1  23798
 CP141120.1  549739
+
 
 ```
 
@@ -104,6 +109,8 @@ LOCAL,RNA,Paired,Illumina,sample6,/path/to/rna1.fastq,/path/to/rna2.fastq
 LOCAL,RNA,Long,Pacbio,sample7,/path/to/rna_pacbio.fastq
 LOCAL,RNA,Long,ONT,sample8,/path/to/rna_nanopore.fastq
 ```
+
+* Both relative PATH and abosolute PATH are accepatable here. 
 
 ## Usage
 
@@ -140,16 +147,20 @@ python sra2genesnv.py \
 
 3. **Sample Processing** (for each sample)
    - **SRA Data**: Downloads and extracts FASTQ files
-   - **Quality Trimming**: Applies Trim Galore for Illumina data
+   - **Quality Trimming**: Applies Trim Galore for short-read data
    - **Alignment**: Uses appropriate aligner based on data type
-     - BWA: Illumina DNA
-     - STAR: Illumina RNA
+     - BWA: short-read DNA
+     - STAR: short-read RNA
      - Minimap2: PacBio/ONT (DNA/RNA)
    - **BAM Processing**: Sorting, indexing, and coverage calculation
 
 4. **Variant Discovery & Calling**
    - BCFtools mpileup with technology-specific parameters
-   - Variant calling with quality filtering (QUAL≥20, DP≥20)
+      - Short-reads with illumina-1.20 preset
+      - Pacbio with pacbio-ccs-1.20 preset
+      - ONT with ont-sup-1.20 preset
+   - Variant calling 
+   - Variant quality filtering (QUAL≥20, DP≥20)
 
 5. **Result Analysis**
    - Compiles metrics for variants of interest
@@ -159,6 +170,26 @@ python sra2genesnv.py \
    - Generates plots for each variant
    - Runs MultiQC for comprehensive QC report
 
+## Accumulative Sample Processing
+
+sra2vcf is designed to work efficiently with growing datasets:
+
+1. **Add New Samples Anytime**
+   - Simply update your sample sheet with new samples
+   - Run the pipeline with the same command as before
+   - Previously processed samples will be detected and skipped
+
+2. **Smart Reprocessing**
+   - Only new samples undergo the full analysis pipeline
+   - Existing sample results are preserved and reused
+
+3. **Automatic Result Aggregation**
+   - All output tables are regenerated combining both previous and new samples
+   - Visualization plots are updated to include all samples in the dataset
+   - MultiQC reports incorporate data from the complete sample set
+
+This feature is particularly valuable for ongoing studies where data is collected over time or for collaborative projects where multiple datasets need to be analyzed consistently.
+
 ## Directory Structure
 
 ### Input Structure
@@ -166,8 +197,7 @@ python sra2genesnv.py \
 ```
 .
 ├── sra2genesnv.py
-├── bin/
-│   └── plot_variants.R
+├── plot_variants.R
 ├── reference.fasta
 ├── annotation.gtf
 ├── variants.txt
@@ -218,6 +248,15 @@ For each variant position in your variant list, the pipeline generates:
    - Adjust the --threads parameter for your system's capabilities
    - For large reference genomes, ensure adequate memory is available
 
+4. **Inconsistent Results After Adding Samples**
+   - If results appear inconsistent after adding new samples, check that the same reference genome and parameters are being used
+   - In rare cases, manually removing specific output files might be necessary to force reprocessing
+
+
+## In developmnent
+
+ - Working on wrapping entire pipeline into Singularity image
+ - Intergrating snpEFF and snpSift scripts into main pipeline
 
 ## Citation
 
@@ -225,3 +264,4 @@ If you use this pipeline in your research, please cite:
 [Insert citation information here]
 
 ## Contact
+Please open an issue if you run into any problems

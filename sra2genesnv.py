@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 
+
+# Author: Rui Xiao, PhD
+
 import argparse
 import os
 import sys
@@ -629,10 +632,11 @@ def analyze_results(samples, vcf_dir, bam_dir, output_dir, variants):
 
 def plot_results_with_r(output_dir, tsv_file, output_prefix):
     logging.info(f"Generating plots for {output_prefix} using R script...")
-    bin_dir = os.path.join(os.getcwd(), 'bin')
-    r_script = os.path.join(bin_dir, 'plot_variants.R')
+    # Get the directory where the Python script is located
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    r_script = os.path.join(script_dir, 'plot_variants.R')
     if not os.path.exists(r_script):
-        logging.error(f"R script {r_script} not found in bin directory.")
+        logging.error(f"R script {r_script} not found in script directory.")
         return
     try:
         # Pass the output directory and output prefix to the R script

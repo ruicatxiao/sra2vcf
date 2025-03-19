@@ -1,4 +1,4 @@
-![Image](https://github.com/user-attachments/assets/8d95fe7b-e1eb-4fa1-b090-191ebe781992)
+![Image](https://github.com/user-attachments/assets/ef863606-31ec-4971-ba10-a29a4e3639a0)
 
 # sra2vcf: A Comprehensive Variant Discovery Pipeline
 

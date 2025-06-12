@@ -62,7 +62,7 @@ All tools should be available in your `$PATH`:
 1. Ensure all required software is installed and available in your `$PATH`
 2. Clone this repository:
    ```bash
-   git clone https://github.com/yourusername/sra2genesnv.git
+   git clone https://github.com/ruicatxiao/sra2vcf.git
    cd sra2genesnv
    ```
 3. Make the script executable:

@@ -118,7 +118,7 @@ def download_sra(sample, fq_dir, threads):
     while retries <= max_retries:
         try:
             subprocess.run([
-                'prefetch', '--max-size', '100000000', sra_number, '-o', sra_file
+                'prefetch', '--max-size', '900000000', sra_number, '-o', sra_file
             ], check=True)
             logging.info(f"Successfully downloaded {sra_number}.sra")
             break  # Exit the loop if prefetch is successful

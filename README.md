@@ -27,7 +27,7 @@ sra2vcf is a Python-based pipeline for performing robust and comprehensive SNP/I
   - Custom plots for variant frequency comparison across samples
   - Technology-specific variant calling parameters
 
-- **Accumulative processing 
+- **Accumulative processing**:
   - Adding new samples over time without reprocessing existing data
   - Automatically regenerates combined figures and tables when new samples are added
 

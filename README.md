@@ -59,13 +59,48 @@ All tools should be available in your `$PATH`:
 
 ## Installation
 
-1. Ensure all required software is installed and available in your `$PATH`
-2. Clone this repository:
+1. Ensure all required software is installed and available in your `$PATH` through manual installation
+
+2. (OPTIONAL) Prepare conda env for software needed
+   ```bash
+   conda create -n sra2vcf python=3.10
+   conda activate sra2vcf
+   conda install -c bioconda \
+     sra-tools=3.0.5 \
+     trim-galore=0.6.10 \
+     bwa=0.7.17 \
+     minimap2=2.26 \
+     star=2.7.10b \
+     samtools=1.19.2 \
+     bcftools=1.20 \
+     multiqc=1.25.2
+   conda install -c conda-forge r-base=4.4.2
+   conda install -c conda-forge \
+     r-ggplot2 \
+     r-reshape2 \
+     r-dplyr
+   # Now check whether the programs are properly installed and accessible from PATH
+   python --version
+   prefetch --version
+   fasterq-dump --version
+   trim_galore --version
+   bwa
+   minimap2 --version
+   STAR --version
+   samtools --version
+   bcftools --version
+   multiqc --version
+   R --version
+   ```
+
+
+
+3. Clone this repository:
    ```bash
    git clone https://github.com/ruicatxiao/sra2vcf.git
    cd sra2genesnv
    ```
-3. Make the script executable:
+4. Make the script executable:
    ```bash
    chmod +x sra2genesnv.py
    ```
